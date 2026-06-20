@@ -30,6 +30,7 @@ def init_queue_manager(
     mount_point: str = "/queue",
     max_concurrent_embedding: int = 10,
     max_concurrent_semantic: int = 64,
+    max_concurrent_extraction: int = 10,
 ) -> "QueueManager":
     """Initialize QueueManager singleton.
 
@@ -39,6 +40,7 @@ def init_queue_manager(
         mount_point: Path where QueueFS is mounted.
         max_concurrent_embedding: Max concurrent embedding tasks.
         max_concurrent_semantic: Max concurrent semantic node work.
+        max_concurrent_extraction: Max concurrent extraction tasks.
     """
     global _instance
     _instance = QueueManager(
@@ -47,6 +49,7 @@ def init_queue_manager(
         mount_point=mount_point,
         max_concurrent_embedding=max_concurrent_embedding,
         max_concurrent_semantic=max_concurrent_semantic,
+        max_concurrent_extraction=max_concurrent_extraction,
     )
     return _instance
 
@@ -67,6 +70,7 @@ class QueueManager:
     # Standard queue names
     EMBEDDING = "Embedding"
     SEMANTIC = "Semantic"
+    EXTRACTION = "Extraction"
 
     def __init__(
         self,
@@ -75,6 +79,7 @@ class QueueManager:
         mount_point: str = "/queue",
         max_concurrent_embedding: int = 10,
         max_concurrent_semantic: int = 64,
+        max_concurrent_extraction: int = 10,
     ):
         """Initialize QueueManager."""
         self._agfs = agfs
@@ -82,6 +87,7 @@ class QueueManager:
         self.mount_point = mount_point
         self._max_concurrent_embedding = max_concurrent_embedding
         self._max_concurrent_semantic = max_concurrent_semantic
+        self._max_concurrent_extraction = max_concurrent_extraction
         self._queues: Dict[str, NamedQueue] = {}
         self._started = False
         self._queue_threads: Dict[str, threading.Thread] = {}
@@ -139,6 +145,19 @@ class QueueManager:
         )
         logger.info("Semantic queue initialized with SemanticProcessor")
 
+        # Extraction Queue
+        from openviking.storage.queuefs.extraction_processor import ExtractionProcessor
+
+        extraction_handler = ExtractionProcessor(
+            max_concurrent_llm=self._max_concurrent_extraction,
+        )
+        self.get_queue(
+            self.EXTRACTION,
+            dequeue_handler=extraction_handler,
+            allow_create=True,
+        )
+        logger.info("Extraction queue initialized with ExtractionProcessor")
+
         if start:
             self.start()
 
@@ -149,11 +168,12 @@ class QueueManager:
             if thread.is_alive():
                 return
 
-        max_concurrent = (
-            self._max_concurrent_embedding
-            if queue.name == self.EMBEDDING
-            else self._max_concurrent_semantic
-        )
+        if queue.name == self.EMBEDDING:
+            max_concurrent = self._max_concurrent_embedding
+        elif queue.name == self.EXTRACTION:
+            max_concurrent = self._max_concurrent_extraction
+        else:
+            max_concurrent = self._max_concurrent_semantic
         stop_event = threading.Event()
         self._queue_stop_events[queue.name] = stop_event
         thread = threading.Thread(
@@ -314,6 +334,16 @@ class QueueManager:
                 )
             elif name == self.SEMANTIC:
                 self._queues[name] = SemanticQueue(
+                    self._agfs,
+                    self.mount_point,
+                    name,
+                    enqueue_hook=enqueue_hook,
+                    dequeue_handler=dequeue_handler,
+                )
+            elif name == self.EXTRACTION:
+                from openviking.storage.queuefs.extraction_queue import ExtractionQueue
+
+                self._queues[name] = ExtractionQueue(
                     self._agfs,
                     self.mount_point,
                     name,

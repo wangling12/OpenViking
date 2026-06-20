@@ -9,6 +9,28 @@ from openviking_cli.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+class ExtractionConfig(BaseModel):
+    """Memory extraction queue configuration."""
+
+    max_concurrent: int = Field(
+        default=10,
+        ge=1,
+        description="Maximum concurrent memory extraction tasks",
+    )
+    max_retries: int = Field(
+        default=3,
+        ge=0,
+        description="Maximum retry attempts for failed extraction",
+    )
+    retry_base_delay_sec: float = Field(
+        default=5.0,
+        gt=0,
+        description="Base delay in seconds for exponential backoff on retry",
+    )
+
+    model_config = {"extra": "forbid"}
+
+
 class MemoryConfig(BaseModel):
     """Memory configuration for OpenViking."""
 
@@ -84,6 +106,10 @@ class MemoryConfig(BaseModel):
             "memory items (page_id, links field, and link resolution). When disabled (default), "
             "no page_id or link fields are generated, and link resolution is skipped."
         ),
+    )
+    extraction: ExtractionConfig = Field(
+        default_factory=ExtractionConfig,
+        description="Memory extraction queue configuration",
     )
 
     model_config = {"extra": "forbid"}

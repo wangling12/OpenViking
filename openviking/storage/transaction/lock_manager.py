@@ -3,7 +3,6 @@
 """LockManager — global singleton managing lock lifecycle and redo recovery."""
 
 import asyncio
-import json
 import time
 from typing import Any, Dict, List, Optional, Protocol
 
@@ -455,15 +454,12 @@ class LockManager:
                 logger.error(f"Redo recovery failed for {task_id}: {e}", exc_info=True)
 
     async def _redo_session_memory(self, info: Dict[str, Any]) -> None:
-        """Re-extract memories from archive.
+        """Re-enqueue extraction for a crashed commit.
 
-        Lets exceptions from _enqueue_semantic propagate so the caller
-        can decide whether to mark the redo task as done.
+        The extraction will be picked by the ExtractionQueue worker.
         """
-        from openviking.message import Message
-        from openviking.server.identity import RequestContext, Role
-        from openviking.storage.viking_fs import get_viking_fs
-        from openviking_cli.session.user_id import UserIdentifier
+        from openviking.storage.queuefs.extraction_msg import ExtractionMsg
+        from openviking.storage.queuefs.queue_manager import get_queue_manager
 
         archive_uri = info.get("archive_uri")
         session_uri = info.get("session_uri")
@@ -474,82 +470,23 @@ class LockManager:
         if not archive_uri or not session_uri:
             raise ValueError("Cannot redo session_memory: missing archive_uri or session_uri")
 
-        # 1. Build request context (needed for path conversion below)
-        user = UserIdentifier(account_id=account_id, user_id=user_id)
-        ctx = RequestContext(user=user, role=Role(role_str))
-
-        # 2. Read archived messages
-        messages_uri = f"{archive_uri}/messages.jsonl"
-        viking_fs = get_viking_fs()
-        agfs_path = viking_fs._uri_to_path(messages_uri, ctx=ctx)
-        messages = []
-        try:
-            content = await self._async_agfs.cat(agfs_path)
-            if isinstance(content, bytes):
-                content = content.decode("utf-8")
-            for line in content.strip().split("\n"):
-                if line.strip():
-                    try:
-                        messages.append(Message.from_dict(json.loads(line)))
-                    except Exception:
-                        pass
-        except Exception as e:
-            logger.warning(f"Cannot read archive for redo: {agfs_path}: {e}")
-
-        # 3. Re-extract memories (best-effort, only if archive was readable)
-        if messages:
-            session_id = session_uri.rstrip("/").rsplit("/", 1)[-1]
-            try:
-                from openviking.session import create_session_compressor
-
-                compressor = create_session_compressor(vikingdb=None)
-                memories = await asyncio.wait_for(
-                    compressor.extract_long_term_memories(
-                        messages=messages,
-                        user=user,
-                        session_id=session_id,
-                        ctx=ctx,
-                    ),
-                    timeout=60.0,
-                )
-                logger.info(f"Redo: extracted {len(memories)} memories from {archive_uri}")
-            except Exception as e:
-                logger.warning(f"Redo: memory extraction failed ({e}), falling back to queue")
-
-        # 4. Always enqueue semantic processing as fallback
-        await self._enqueue_semantic(
-            uri=session_uri,
-            context_type="memory",
-            account_id=account_id,
-            user_id=user_id,
-            peer_id=user_id,
-            role=role_str,
-        )
-
-    async def _enqueue_semantic(self, **params: Any) -> None:
-        from openviking.storage.queuefs import get_queue_manager
-        from openviking.storage.queuefs.semantic_msg import SemanticMsg
-        from openviking.storage.queuefs.semantic_queue import SemanticQueue
+        session_id = session_uri.rstrip("/").rsplit("/", 1)[-1]
 
         queue_manager = get_queue_manager()
         if queue_manager is None:
-            logger.debug("No queue manager available, skipping enqueue_semantic")
+            logger.warning("No queue manager available, skipping redo for %s", archive_uri)
             return
 
-        uri = params.get("uri")
-        if not uri:
-            return
-
-        msg = SemanticMsg(
-            uri=uri,
-            context_type=params.get("context_type", "resource"),
-            account_id=params.get("account_id", "default"),
-            user_id=params.get("user_id", "default"),
-            peer_id=params.get("peer_id", "default"),
-            role=params.get("role", "root"),
+        msg = ExtractionMsg(
+            session_id=session_id,
+            archive_uri=archive_uri,
+            account_id=account_id,
+            user_id=user_id,
+            role=role_str,
         )
-        semantic_queue: SemanticQueue = queue_manager.get_queue(queue_manager.SEMANTIC)  # type: ignore[assignment]
-        await semantic_queue.enqueue(msg)
+        extraction_queue = queue_manager.get_queue(queue_manager.EXTRACTION)
+        await extraction_queue.enqueue(msg)
+        logger.info("Re-enqueued extraction for redo task: %s", archive_uri)
 
 
 # ---------------------------------------------------------------------------

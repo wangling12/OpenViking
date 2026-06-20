@@ -1330,186 +1330,27 @@ class Session:
                             },
                         )
 
-                    latest_archive_overview = await self._get_latest_completed_archive_overview(
-                        exclude_archive_uri=archive_uri
+                    # Enqueue extraction task
+                    from openviking.storage.queuefs.extraction_msg import ExtractionMsg
+                    from openviking.storage.queuefs.queue_manager import get_queue_manager
+
+                    queue_manager = get_queue_manager()
+                    extraction_msg = ExtractionMsg(
+                        session_id=self.session_id,
+                        archive_uri=archive_uri,
+                        account_id=self.ctx.account_id,
+                        user_id=self.ctx.user.user_id,
+                        role=str(self.ctx.role),
+                        telemetry_id=telemetry.telemetry_id,
                     )
-                    extraction_messages = await self._hydrate_tool_outputs_for_extraction(messages)
-
-                    async def _run_archive_summary() -> None:
-                        summary = await self._generate_archive_summary_async(
-                            extraction_messages,
-                            latest_archive_overview=latest_archive_overview,
-                        )
-                        if self._viking_fs and summary:
-                            abstract = self._extract_abstract_from_summary(summary)
-                            await self._viking_fs.write_file(
-                                uri=f"{archive_uri}/.abstract.md",
-                                content=abstract,
-                                ctx=self.ctx,
-                            )
-                            await self._viking_fs.write_file(
-                                uri=f"{archive_uri}/.overview.md",
-                                content=summary,
-                                ctx=self.ctx,
-                            )
-                            await self._viking_fs.write_file(
-                                uri=f"{archive_uri}/.meta.json",
-                                content=json.dumps(
-                                    {
-                                        "overview_tokens": estimate_text_tokens(summary),
-                                        "abstract_tokens": estimate_text_tokens(abstract),
-                                    }
-                                ),
-                                ctx=self.ctx,
-                            )
-
-                    # Summary, long-term memory, and execution-derived memory run concurrently.
-                    ov_config = get_openviking_config()
-                    memory_extraction_enabled = ov_config.memory.extraction_enabled
-                    config_session_skill_extraction_enabled = (
-                        ov_config.memory.session_skill_extraction_enabled
+                    extraction_queue = queue_manager.get_queue(queue_manager.EXTRACTION)
+                    enqueue_result = await extraction_queue.enqueue(extraction_msg)
+                    logger.info(
+                        "Enqueued extraction for session %s archive %s: %s",
+                        self.session_id,
+                        archive_uri,
+                        enqueue_result,
                     )
-                    effective_policy = MemoryPolicy.from_dict(memory_policy)
-                    extraction_scope = _resolve_memory_extraction_scope(
-                        self.ctx,
-                        effective_policy,
-                        extraction_messages,
-                        config_session_skill_extraction_enabled=(
-                            config_session_skill_extraction_enabled
-                        ),
-                    )
-                    self_memory_enabled = extraction_scope.allow_self_memory
-                    allowed_peer_ids = extraction_scope.allowed_peer_ids
-                    session_skill_extraction_enabled = extraction_scope.include_session_skills
-                    memory_type_filter = extraction_scope.memory_types
-                    long_term_memory_types, execution_memory_types = _split_policy_memory_types(
-                        memory_type_filter
-                    )
-
-                    long_term_has_work = (
-                        memory_extraction_enabled
-                        and (self_memory_enabled or allowed_peer_ids)
-                        and (long_term_memory_types is None or bool(long_term_memory_types))
-                    )
-                    execution_memory_has_work = (
-                        self_memory_enabled
-                        and memory_extraction_enabled
-                        and (execution_memory_types is None or bool(execution_memory_types))
-                    )
-                    session_skill_extraction_enabled = (
-                        session_skill_extraction_enabled and execution_memory_has_work
-                    )
-                    has_policy_work = bool(long_term_has_work or execution_memory_has_work)
-                    if self._session_compressor and has_policy_work:
-                        logger.info(
-                            "Starting post-commit extraction from %s archived messages",
-                            len(messages),
-                        )
-
-                        has_execution_memory = hasattr(
-                            self._session_compressor, "extract_execution_memories"
-                        )
-
-                        extraction_tasks: List[Any] = [_run_archive_summary()]
-                        extraction_labels = ["archive_summary"]
-
-                        if long_term_has_work:
-                            extraction_tasks.append(
-                                self._session_compressor.extract_long_term_memories(
-                                    messages=extraction_messages,
-                                    user=self.user,
-                                    session_id=self.session_id,
-                                    ctx=self.ctx,
-                                    latest_archive_overview=latest_archive_overview,
-                                    archive_uri=archive_uri,
-                                    allowed_memory_types=long_term_memory_types,
-                                    allow_self_memory=self_memory_enabled,
-                                    allowed_peer_ids=allowed_peer_ids,
-                                )
-                            )
-                            extraction_labels.append("long_term")
-
-                        if has_execution_memory and execution_memory_has_work:
-                            try:
-                                extraction_tasks.append(
-                                    self._session_compressor.extract_execution_memories(
-                                        messages=extraction_messages,
-                                        ctx=self.ctx,
-                                        latest_archive_overview=latest_archive_overview,
-                                        archive_uri=archive_uri,
-                                        allowed_memory_types=execution_memory_types,
-                                        include_session_skills=session_skill_extraction_enabled,
-                                    )
-                                )
-                                extraction_labels.append("execution")
-                            except Exception as exc:
-                                logger.error(
-                                    "Execution memory extraction failed: %s",
-                                    exc,
-                                    exc_info=exc,
-                                )
-
-                        _results = await asyncio.gather(
-                            *extraction_tasks,
-                            return_exceptions=True,
-                        )
-                        summary_result = _results[0]
-
-                        if isinstance(summary_result, Exception):
-                            logger.error(
-                                f"Archive summary generation failed: {summary_result}",
-                                exc_info=summary_result,
-                            )
-
-                        total_extracted = 0
-                        extraction_errors: list[BaseException] = []
-                        for label, result in zip(extraction_labels[1:], _results[1:], strict=True):
-                            if isinstance(result, Exception):
-                                logger.error(
-                                    "Memory extraction failed for %s: %s",
-                                    label,
-                                    result,
-                                    exc_info=result,
-                                )
-                                extraction_errors.append(result)
-                                continue
-
-                            if isinstance(result, dict):
-                                target_contexts = list(result.get("contexts", []))
-                                target_skills = list(result.get("session_skills", []))
-                            else:
-                                target_contexts = list(result or [])
-                                target_skills = []
-                            logger.info(
-                                "Extracted %s memories for %s",
-                                len(target_contexts),
-                                label,
-                            )
-                            total_extracted += len(target_contexts)
-                            for ctx_item in target_contexts:
-                                cat = getattr(ctx_item, "category", "") or "unknown"
-                                memories_extracted[cat] = memories_extracted.get(cat, 0) + 1
-                            if target_skills:
-                                extracted_skill_results.extend(target_skills)
-
-                        if extraction_errors:
-                            raise extraction_errors[0]
-
-                        if total_extracted:
-                            self._stats.memories_extracted += total_extracted
-                        if extracted_skill_results:
-                            logger.info(
-                                "Extracted %s session skills",
-                                len(extracted_skill_results),
-                            )
-                        get_current_telemetry().set("memory.extracted", total_extracted)
-                    else:
-                        if self._session_compressor:
-                            logger.info(
-                                "Memory and session skill extraction skipped "
-                                "(disabled by config or memory_policy)"
-                            )
-                        await _run_archive_summary()
 
                     # Write relations (using snapshot, not self._usage_records)
                     if self._viking_fs:

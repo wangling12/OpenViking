@@ -117,6 +117,7 @@ class OpenVikingService:
             config.storage,
             config.embedding.max_concurrent,
             config.vlm.max_concurrent,
+            max_concurrent_extraction=config.memory.extraction.max_concurrent,
             binding_config=binding_config,
         )
 
@@ -131,6 +132,7 @@ class OpenVikingService:
         config: StorageConfig,
         max_concurrent_embedding: int = 10,
         max_concurrent_semantic: int = 64,
+        max_concurrent_extraction: int = 10,
         binding_config: Any = None,
     ) -> None:
         """Initialize storage resources."""
@@ -149,6 +151,7 @@ class OpenVikingService:
                 mount_point=queue_mount_point,
                 max_concurrent_embedding=max_concurrent_embedding,
                 max_concurrent_semantic=max_concurrent_semantic,
+                max_concurrent_extraction=max_concurrent_extraction,
             )
         else:
             logger.warning("RAGFS client not initialized, skipping queue manager")
@@ -286,6 +289,7 @@ class OpenVikingService:
                 self._config.storage,
                 self._config.embedding.max_concurrent,
                 self._config.vlm.max_concurrent,
+                max_concurrent_extraction=self._config.memory.extraction.max_concurrent,
                 binding_config=self._build_ragfs_binding_config(),
             )
 
