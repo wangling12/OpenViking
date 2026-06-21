@@ -118,3 +118,28 @@ async def test_extraction_queue_dequeue_returns_extraction_msg():
         assert result.role == "admin"
         assert result.telemetry_id == "tm-001"
         assert result.created_at == msg.created_at
+
+
+@pytest.mark.asyncio
+async def test_extraction_queue_enqueue_skip_dedupe_bypasses_deduplication():
+    mock_agfs = MagicMock()
+    with patch.object(NamedQueue, "enqueue", new_callable=AsyncMock) as named_enqueue:
+        named_enqueue.return_value = "queued-id"
+        q = ExtractionQueue(mock_agfs, "/queue", "extraction")
+        msg1 = ExtractionMsg(
+            session_id="sess-1",
+            archive_uri="viking://user/default/archive/sess-1",
+            account_id="acc",
+            user_id="u1",
+        )
+        msg2 = ExtractionMsg(
+            session_id="sess-1",
+            archive_uri="viking://user/default/archive/sess-1",
+            account_id="acc",
+            user_id="u1",
+        )
+        r1 = await q.enqueue(msg1)
+        r2 = await q.enqueue(msg2, skip_dedupe=True)
+        assert r1 == "queued-id"
+        assert r2 == "queued-id"
+        assert named_enqueue.call_count == 2

@@ -454,10 +454,6 @@ class LockManager:
                 logger.error(f"Redo recovery failed for {task_id}: {e}", exc_info=True)
 
     async def _redo_session_memory(self, info: Dict[str, Any]) -> None:
-        """Re-enqueue extraction for a crashed commit.
-
-        The extraction will be picked by the ExtractionQueue worker.
-        """
         from openviking.storage.queuefs.extraction_msg import ExtractionMsg
         from openviking.storage.queuefs.queue_manager import get_queue_manager
 
@@ -466,15 +462,17 @@ class LockManager:
         account_id = info.get("account_id", "default")
         user_id = info.get("user_id", "default")
         role_str = info.get("role", "root")
+        memory_policy = info.get("memory_policy")
 
         if not archive_uri or not session_uri:
             raise ValueError("Cannot redo session_memory: missing archive_uri or session_uri")
 
         session_id = session_uri.rstrip("/").rsplit("/", 1)[-1]
 
-        queue_manager = get_queue_manager()
-        if queue_manager is None:
-            logger.warning("No queue manager available, skipping redo for %s", archive_uri)
+        try:
+            queue_manager = get_queue_manager()
+        except RuntimeError:
+            logger.warning("Queue manager not available, skipping redo for %s", archive_uri)
             return
 
         msg = ExtractionMsg(
@@ -483,9 +481,10 @@ class LockManager:
             account_id=account_id,
             user_id=user_id,
             role=role_str,
+            memory_policy=memory_policy,
         )
         extraction_queue = queue_manager.get_queue(queue_manager.EXTRACTION)
-        await extraction_queue.enqueue(msg)
+        await extraction_queue.enqueue(msg, skip_dedupe=True)
         logger.info("Re-enqueued extraction for redo task: %s", archive_uri)
 
 

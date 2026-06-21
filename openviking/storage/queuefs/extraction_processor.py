@@ -22,6 +22,8 @@ logger = get_logger(__name__)
 class ExtractionProcessor(DequeueHandlerBase):
     """Processes ExtractionMsg: runs memory extraction with rate limiting."""
 
+    _MAX_RETRIES = 5
+
     def __init__(self):
         config = get_openviking_config()
         breaker_cfg = config.embedding.circuit_breaker
@@ -41,7 +43,7 @@ class ExtractionProcessor(DequeueHandlerBase):
         queue_manager = get_queue_manager()
         if queue_manager is not None:
             extraction_queue = queue_manager.get_queue(queue_manager.EXTRACTION)
-            await extraction_queue.enqueue(msg)
+            await extraction_queue.enqueue(msg, skip_dedupe=True)
             logger.info("Re-enqueued extraction message: %s", msg.archive_uri)
         else:
             logger.warning("No queue manager available, cannot re-enqueue: %s", msg.archive_uri)
@@ -59,7 +61,8 @@ class ExtractionProcessor(DequeueHandlerBase):
             if "data" in data and isinstance(data["data"], str):
                 data = json.loads(data["data"])
 
-            assert data is not None
+            if data is None:
+                raise ValueError("Message data is None after parsing")
             msg = ExtractionMsg.from_dict(data)
         except Exception as e:
             logger.error("Failed to parse ExtractionMsg: %s", e, exc_info=True)
@@ -70,6 +73,14 @@ class ExtractionProcessor(DequeueHandlerBase):
             self._circuit_breaker.check()
         except CircuitBreakerOpen:
             msg.retry_count += 1
+            if msg.retry_count > self._MAX_RETRIES:
+                logger.error(
+                    "Max retries exceeded for extraction %s (retry %d), dropping",
+                    msg.archive_uri,
+                    msg.retry_count,
+                )
+                self.report_error("Max retries exceeded", data)
+                return None
             logger.warning(
                 "Circuit breaker is open, re-enqueueing extraction (retry %d): %s",
                 msg.retry_count,
@@ -113,6 +124,15 @@ class ExtractionProcessor(DequeueHandlerBase):
 
         except Exception as e:
             msg.retry_count += 1
+            if msg.retry_count > self._MAX_RETRIES:
+                logger.error(
+                    "Max retries exceeded for extraction %s (retry %d), dropping: %s",
+                    msg.archive_uri,
+                    msg.retry_count,
+                    e,
+                )
+                self.report_error(str(e), data)
+                return None
             logger.warning(
                 "Extraction error for %s, re-enqueueing (retry %d): %s",
                 msg.archive_uri,

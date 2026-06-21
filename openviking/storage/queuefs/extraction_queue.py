@@ -28,24 +28,30 @@ class ExtractionQueue(NamedQueue):
     def _dedupe_key(msg: ExtractionMsg) -> str:
         return f"{msg.account_id}|{msg.user_id}|{msg.session_id}"
 
-    async def enqueue(self, msg: ExtractionMsg) -> str:
-        """Serialize ExtractionMsg object and store in queue."""
-        key = self._dedupe_key(msg)
-        now = time.monotonic()
-        with self._dedupe_lock:
-            last = self._last_enqueue.get(key, 0.0)
-            if now - last < _EXTRACTION_DEDUPE_SEC:
-                logger.debug(
-                    "[ExtractionQueue] Skipping duplicate extraction for session %s",
-                    msg.session_id,
-                )
-                return "deduplicated"
-            self._last_enqueue[key] = now
-            if len(self._last_enqueue) > 2000:
-                cutoff = now - (_EXTRACTION_DEDUPE_SEC * 4)
-                stale = [k for k, t in self._last_enqueue.items() if t < cutoff]
-                for k in stale[:800]:
-                    self._last_enqueue.pop(k, None)
+    async def enqueue(self, msg: ExtractionMsg, skip_dedupe: bool = False) -> str:
+        """Serialize ExtractionMsg object and store in queue.
+        
+        Args:
+            msg: The extraction message to enqueue
+            skip_dedupe: If True, bypass deduplication (used for retries)
+        """
+        if not skip_dedupe:
+            key = self._dedupe_key(msg)
+            now = time.monotonic()
+            with self._dedupe_lock:
+                last = self._last_enqueue.get(key, 0.0)
+                if now - last < _EXTRACTION_DEDUPE_SEC:
+                    logger.debug(
+                        "[ExtractionQueue] Skipping duplicate extraction for session %s",
+                        msg.session_id,
+                    )
+                    return "deduplicated"
+                self._last_enqueue[key] = now
+                if len(self._last_enqueue) > 2000:
+                    cutoff = now - (_EXTRACTION_DEDUPE_SEC * 4)
+                    stale = [k for k, t in self._last_enqueue.items() if t < cutoff]
+                    for k in stale[:800]:
+                        self._last_enqueue.pop(k, None)
 
         return await super().enqueue(msg.to_dict())
 

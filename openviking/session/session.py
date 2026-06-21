@@ -1327,6 +1327,7 @@ class Session:
                                 "account_id": self.ctx.account_id,
                                 "user_id": self.ctx.user.user_id,
                                 "role": str(self.ctx.role),
+                                "memory_policy": memory_policy,
                             },
                         )
 
@@ -1334,24 +1335,34 @@ class Session:
                     from openviking.storage.queuefs.extraction_msg import ExtractionMsg
                     from openviking.storage.queuefs.queue_manager import get_queue_manager
 
-                    queue_manager = get_queue_manager()
-                    extraction_msg = ExtractionMsg(
-                        session_id=self.session_id,
-                        archive_uri=archive_uri,
-                        account_id=self.ctx.account_id,
-                        user_id=self.ctx.user.user_id,
-                        role=str(self.ctx.role),
-                        telemetry_id=telemetry.telemetry_id,
-                        memory_policy=memory_policy,
-                    )
-                    extraction_queue = queue_manager.get_queue(queue_manager.EXTRACTION)
-                    enqueue_result = await extraction_queue.enqueue(extraction_msg)
-                    logger.info(
-                        "Enqueued extraction for session %s archive %s: %s",
-                        self.session_id,
-                        archive_uri,
-                        enqueue_result,
-                    )
+                    try:
+                        queue_manager = get_queue_manager()
+                    except RuntimeError:
+                        queue_manager = None
+
+                    if queue_manager is not None:
+                        extraction_msg = ExtractionMsg(
+                            session_id=self.session_id,
+                            archive_uri=archive_uri,
+                            account_id=self.ctx.account_id,
+                            user_id=self.ctx.user.user_id,
+                            role=str(self.ctx.role),
+                            telemetry_id=telemetry.telemetry_id,
+                            memory_policy=memory_policy,
+                        )
+                        extraction_queue = queue_manager.get_queue(queue_manager.EXTRACTION)
+                        enqueue_result = await extraction_queue.enqueue(extraction_msg)
+                        logger.info(
+                            "Enqueued extraction for session %s archive %s: %s",
+                            self.session_id,
+                            archive_uri,
+                            enqueue_result,
+                        )
+                    else:
+                        logger.warning(
+                            "Queue manager not available, skipping extraction enqueue for session %s",
+                            self.session_id,
+                        )
 
                     # Write relations (using snapshot, not self._usage_records)
                     if self._viking_fs:
