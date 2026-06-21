@@ -114,6 +114,9 @@ class ExtractionProcessor(DequeueHandlerBase):
                 self.report_success()
                 return None
 
+            session_uri = msg.archive_uri.rsplit("/history/", 1)[0]
+            messages = await self._hydrate_tool_outputs(messages, session_uri, ctx)
+
             latest_overview = await self._get_latest_archive_overview(msg, ctx)
 
             await self._run_extraction(msg, messages, ctx, latest_overview)
@@ -176,13 +179,70 @@ class ExtractionProcessor(DequeueHandlerBase):
             )
         return messages
 
-    async def _get_latest_archive_overview(
-        self, msg: Any, ctx: RequestContext
-    ) -> str:
+    async def _hydrate_tool_outputs(
+        self, messages: List[Any], session_uri: str, ctx: RequestContext
+    ) -> List[Any]:
+        from openviking.message.part import ToolPart
+        from openviking.session.tool_result_store import ToolResultStore
         from openviking.storage.viking_fs import get_viking_fs
 
         viking_fs = get_viking_fs()
-        archive_uri = msg.archive_uri
+        session_id = session_uri.rstrip("/").rsplit("/", 1)[-1]
+        store = ToolResultStore(viking_fs, session_uri, session_id, ctx)
+
+        hydrated = []
+        for msg in messages:
+            msg_dict = msg.to_dict() if hasattr(msg, "to_dict") else dict(msg.__dict__)
+            hydrated_msg = type(msg).from_dict(msg_dict)
+            for part in hydrated_msg.parts:
+                if not isinstance(part, ToolPart):
+                    continue
+                if not part.tool_output_ref:
+                    continue
+                if not (part.tool_output_truncated or part.tool_output_source_ref):
+                    continue
+
+                ref = part.tool_output_source_ref or part.tool_output_ref
+                tool_result_id = ref.rstrip("/").split("/")[-1]
+                offset = part.tool_output_source_offset if part.tool_output_source_ref else 0
+                limit = part.tool_output_source_limit if part.tool_output_source_ref else -1
+                if (
+                    part.tool_output_source_ref
+                    and limit is None
+                    and part.tool_output_original_chars is not None
+                ):
+                    limit = part.tool_output_original_chars
+                try:
+                    result = await store.read(
+                        tool_result_id,
+                        offset=max(0, int(offset or 0)),
+                        limit=int(limit) if limit is not None else -1,
+                        include_metadata=False,
+                    )
+                    part.tool_output = result.get("content", "")
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to hydrate tool output for extraction: "
+                        "session=%s message_id=%s tool_id=%s ref=%s error=%s",
+                        session_id,
+                        msg.id,
+                        part.tool_id,
+                        ref,
+                        exc,
+                    )
+                    continue
+            hydrated.append(hydrated_msg)
+        return hydrated
+
+    async def _get_latest_archive_overview(
+        self, msg: Any, ctx: RequestContext
+    ) -> str:
+        import re
+
+        from openviking.storage.viking_fs import get_viking_fs
+
+        viking_fs = get_viking_fs()
+        archive_uri = msg.archive_uri.rstrip("/")
         parent_uri = archive_uri.rsplit("/", 1)[0] if "/" in archive_uri else ""
         if not parent_uri:
             return ""
@@ -192,18 +252,30 @@ class ExtractionProcessor(DequeueHandlerBase):
         except Exception:
             return ""
 
+        def parse_archive_index(name: str) -> int:
+            match = re.search(r"archive_(\d+)$", name)
+            return int(match.group(1)) if match else -1
+
         archive_dirs = sorted(
             [
                 e["name"]
                 for e in entries
-                if e.get("isDir")
-                and e["name"] != msg.session_id
+                if e.get("isDir") and e["name"].startswith("archive_")
             ],
+            key=parse_archive_index,
             reverse=True,
         )
 
         for archive_name in archive_dirs[:5]:
-            overview_uri = f"{parent_uri}/{archive_name}/.overview.md"
+            candidate_uri = f"{parent_uri}/{archive_name}"
+            if candidate_uri == archive_uri:
+                continue
+            done_uri = f"{candidate_uri}/.done"
+            try:
+                await viking_fs.read_file(done_uri, ctx=ctx)
+            except Exception:
+                continue
+            overview_uri = f"{candidate_uri}/.overview.md"
             try:
                 overview = await viking_fs.read_file(overview_uri, ctx=ctx)
                 if overview:

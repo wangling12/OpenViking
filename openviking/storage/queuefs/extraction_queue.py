@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0
 """ExtractionQueue: Memory extraction queue."""
 
-import threading
+import asyncio
 import time
 from typing import Optional
 
@@ -22,7 +22,7 @@ class ExtractionQueue(NamedQueue):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._last_enqueue: dict[str, float] = {}
-        self._dedupe_lock = threading.Lock()
+        self._dedupe_lock = asyncio.Lock()
 
     @staticmethod
     def _dedupe_key(msg: ExtractionMsg) -> str:
@@ -38,7 +38,7 @@ class ExtractionQueue(NamedQueue):
         if not skip_dedupe:
             key = self._dedupe_key(msg)
             now = time.monotonic()
-            with self._dedupe_lock:
+            async with self._dedupe_lock:
                 last = self._last_enqueue.get(key, 0.0)
                 if now - last < _EXTRACTION_DEDUPE_SEC:
                     logger.debug(

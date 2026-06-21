@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Beijing Volvo Engine Technology Co., Ltd.
+# Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
 
 import time
