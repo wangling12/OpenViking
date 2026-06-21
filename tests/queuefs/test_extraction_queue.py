@@ -91,7 +91,7 @@ async def test_extraction_queue_enqueue_allows_after_dedupe_window():
 
 
 @pytest.mark.asyncio
-async def test_extraction_queue_dequeue_returns_extraction_msg():
+async def test_extraction_queue_dequeue_returns_raw_dict():
     mock_agfs = MagicMock()
     msg = ExtractionMsg(
         session_id="sess-1",
@@ -109,15 +109,14 @@ async def test_extraction_queue_dequeue_returns_extraction_msg():
         result = await q.dequeue()
 
         assert result is not None
-        assert isinstance(result, ExtractionMsg)
-        assert result.id == msg.id
-        assert result.session_id == "sess-1"
-        assert result.archive_uri == "viking://user/default/archive/sess-1"
-        assert result.account_id == "acc-1"
-        assert result.user_id == "user-1"
-        assert result.role == "admin"
-        assert result.telemetry_id == "tm-001"
-        assert result.created_at == msg.created_at
+        assert isinstance(result, dict)
+        assert result["session_id"] == "sess-1"
+        assert result["archive_uri"] == "viking://user/default/archive/sess-1"
+        assert result["account_id"] == "acc-1"
+        assert result["user_id"] == "user-1"
+        assert result["role"] == "admin"
+        assert result["telemetry_id"] == "tm-001"
+        assert result["created_at"] == msg.created_at
 
 
 @pytest.mark.asyncio

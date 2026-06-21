@@ -121,8 +121,7 @@ class ExtractionProcessor(DequeueHandlerBase):
 
             stats = await self._run_extraction(msg, messages, ctx, latest_overview)
 
-            # Write stats to file for session to read
-            await self._write_extraction_stats(msg.archive_uri, stats, ctx)
+            await self._update_session_meta(session_uri, stats, ctx)
 
             self.report_success()
             self._circuit_breaker.record_success()
@@ -379,7 +378,7 @@ class ExtractionProcessor(DequeueHandlerBase):
 
         extraction_errors: List[BaseException] = []
         for label, res in zip(labels, results):
-            if isinstance(res, Exception):
+            if isinstance(res, BaseException):
                 logger.error("Extraction task %s failed: %s", label, res, exc_info=res)
                 self._circuit_breaker.record_failure(res)
                 extraction_errors.append(res)
@@ -409,21 +408,34 @@ class ExtractionProcessor(DequeueHandlerBase):
 
         return stats
 
-    async def _write_extraction_stats(
-        self, archive_uri: str, stats: Dict[str, Any], ctx: RequestContext
+    async def _update_session_meta(
+        self, session_uri: str, stats: Dict[str, Any], ctx: RequestContext
     ) -> None:
         from openviking.storage.viking_fs import get_viking_fs
 
         viking_fs = get_viking_fs()
-        stats_uri = f"{archive_uri}/.extraction_stats.json"
+        meta_uri = f"{session_uri}/.meta.json"
+        try:
+            content = await viking_fs.read_file(meta_uri, ctx=ctx)
+            meta = json.loads(content)
+        except Exception as e:
+            logger.warning("Failed to read session meta: %s", e)
+            return
+
+        memories_extracted = meta.get("memories_extracted", {})
+        for cat, count in stats.get("memories_extracted", {}).items():
+            memories_extracted[cat] = memories_extracted.get(cat, 0) + count
+            memories_extracted["total"] = memories_extracted.get("total", 0) + count
+        meta["memories_extracted"] = memories_extracted
+
         try:
             await viking_fs.write_file(
-                stats_uri,
-                json.dumps(stats, ensure_ascii=False),
+                meta_uri,
+                json.dumps(meta, ensure_ascii=False, indent=2),
                 ctx=ctx,
             )
         except Exception as e:
-            logger.warning("Failed to write extraction stats: %s", e)
+            logger.warning("Failed to update session meta: %s", e)
 
     async def _run_archive_summary(
         self,

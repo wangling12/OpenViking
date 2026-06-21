@@ -4,7 +4,6 @@
 
 import asyncio
 import time
-from typing import Optional
 
 from openviking_cli.utils.logger import get_logger
 
@@ -54,39 +53,3 @@ class ExtractionQueue(NamedQueue):
                         self._last_enqueue.pop(k, None)
 
         return await super().enqueue(msg.to_dict())
-
-    async def dequeue(self) -> Optional[ExtractionMsg]:
-        """Get message from queue and deserialize to ExtractionMsg object."""
-        data_dict = await super().dequeue()
-        if not data_dict:
-            return None
-
-        if "data" in data_dict and isinstance(data_dict["data"], str):
-            try:
-                return ExtractionMsg.from_json(data_dict["data"])
-            except Exception as e:
-                logger.debug(f"[ExtractionQueue] Failed to parse message data: {e}")
-                return None
-
-        try:
-            return ExtractionMsg.from_dict(data_dict)
-        except Exception as e:
-            logger.debug(f"[ExtractionQueue] Failed to create ExtractionMsg from dict: {e}")
-            return None
-
-    async def peek(self) -> Optional[ExtractionMsg]:
-        """Peek at message from queue."""
-        data_dict = await super().peek()
-        if not data_dict:
-            return None
-
-        if "data" in data_dict and isinstance(data_dict["data"], str):
-            try:
-                return ExtractionMsg.from_json(data_dict["data"])
-            except Exception:
-                return None
-
-        try:
-            return ExtractionMsg.from_dict(data_dict)
-        except Exception:
-            return None

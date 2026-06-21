@@ -1412,19 +1412,12 @@ class Session:
                 request_wait_tracker.cleanup(telemetry.telemetry_id)
                 unregister_telemetry(telemetry.telemetry_id)
 
-            # Read extraction stats from file (written by ExtractionProcessor)
-            extraction_stats = await self._read_extraction_stats(archive_uri)
-            if extraction_stats:
-                memories_extracted = extraction_stats.get("memories_extracted", {})
-                extracted_skill_results = [
-                    {"uri": uri} for uri in extraction_stats.get("session_skill_uris", [])
-                ]
-
             # Phase 2 complete — update meta with telemetry and commit info
+            # Extraction runs async; memories_extracted stats updated by ExtractionProcessor
             snapshot = telemetry.finish("ok")
             await self._merge_and_save_commit_meta(
                 archive_index=archive_index,
-                memories_extracted=memories_extracted,
+                memories_extracted={},
                 telemetry_snapshot=snapshot,
             )
 
@@ -1436,13 +1429,9 @@ class Session:
                 {
                     "session_id": self.session_id,
                     "archive_uri": archive_uri,
-                    "memories_extracted": memories_extracted,
-                    "session_skills_extracted": len(extracted_skill_results),
-                    "session_skill_uris": [
-                        item.get("uri") or item.get("root_uri")
-                        for item in extracted_skill_results
-                        if isinstance(item, dict) and (item.get("uri") or item.get("root_uri"))
-                    ],
+                    "memories_extracted": {},
+                    "session_skills_extracted": 0,
+                    "session_skill_uris": [],
                     "active_count_updated": active_count_updated,
                     "token_usage": {
                         "llm": dict(self._meta.llm_token_usage),
@@ -1458,7 +1447,7 @@ class Session:
                 account_id=self.ctx.account_id,
                 user_id=self.ctx.user.user_id,
             )
-            logger.info(f"Session {self.session_id} memory extraction completed")
+            logger.info(f"Session {self.session_id} extraction enqueued")
         except asyncio.CancelledError as e:
             if redo_enabled and redo_task_id:
                 await redo_log.mark_done_async(redo_task_id)
@@ -1512,17 +1501,6 @@ class Session:
             content=content,
             ctx=self.ctx,
         )
-
-    async def _read_extraction_stats(self, archive_uri: str) -> Optional[Dict[str, Any]]:
-        """Read extraction stats from file written by ExtractionProcessor."""
-        if not self._viking_fs:
-            return None
-        stats_uri = f"{archive_uri}/.extraction_stats.json"
-        try:
-            content = await self._viking_fs.read_file(stats_uri, ctx=self.ctx)
-            return json.loads(content)
-        except Exception:
-            return None
 
     async def _write_failed_marker(
         self,
