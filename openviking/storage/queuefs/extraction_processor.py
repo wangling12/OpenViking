@@ -89,6 +89,7 @@ class ExtractionProcessor(DequeueHandlerBase):
             try:
                 await self._reenqueue_extraction_msg(msg)
                 self.report_requeue()
+                self.report_success()
             except Exception as requeue_err:
                 logger.error("Failed to re-enqueue extraction: %s", requeue_err)
                 self.report_error(str(requeue_err), data)
@@ -114,7 +115,12 @@ class ExtractionProcessor(DequeueHandlerBase):
                 self.report_success()
                 return None
 
-            session_uri = msg.archive_uri.rsplit("/history/", 1)[0]
+            parts = msg.archive_uri.rsplit("/history/", 1)
+            if len(parts) != 2:
+                logger.error("archive_uri missing /history/ segment: %s", msg.archive_uri)
+                self.report_error("Invalid archive_uri format", data)
+                return None
+            session_uri = parts[0]
             messages = await self._hydrate_tool_outputs(messages, session_uri, ctx)
 
             latest_overview = await self._get_latest_archive_overview(msg, ctx)
@@ -149,6 +155,7 @@ class ExtractionProcessor(DequeueHandlerBase):
             try:
                 await self._reenqueue_extraction_msg(msg)
                 self.report_requeue()
+                self.report_success()
             except Exception as requeue_err:
                 logger.error("Failed to re-enqueue extraction: %s", requeue_err)
                 self.report_error(str(requeue_err), data)
