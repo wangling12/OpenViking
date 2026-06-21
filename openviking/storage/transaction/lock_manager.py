@@ -456,6 +456,7 @@ class LockManager:
     async def _redo_session_memory(self, info: Dict[str, Any]) -> None:
         from openviking.storage.queuefs.extraction_msg import ExtractionMsg
         from openviking.storage.queuefs.queue_manager import get_queue_manager
+        from openviking.storage.queuefs.semantic_msg import SemanticMsg
 
         archive_uri = info.get("archive_uri")
         session_uri = info.get("session_uri")
@@ -475,6 +476,7 @@ class LockManager:
             logger.warning("Queue manager not available, skipping redo for %s", archive_uri)
             return
 
+        # Enqueue extraction
         msg = ExtractionMsg(
             session_id=session_id,
             archive_uri=archive_uri,
@@ -486,6 +488,19 @@ class LockManager:
         extraction_queue = queue_manager.get_queue(queue_manager.EXTRACTION)
         await extraction_queue.enqueue(msg, skip_dedupe=True)
         logger.info("Re-enqueued extraction for redo task: %s", archive_uri)
+
+        # Enqueue semantic processing as fallback (ensures session gets indexed)
+        semantic_msg = SemanticMsg(
+            uri=session_uri,
+            context_type="memory",
+            account_id=account_id,
+            user_id=user_id,
+            peer_id=user_id,
+            role=role_str,
+        )
+        semantic_queue = queue_manager.get_queue(queue_manager.SEMANTIC)
+        await semantic_queue.enqueue(semantic_msg)
+        logger.info("Re-enqueued semantic for redo task: %s", session_uri)
 
 
 # ---------------------------------------------------------------------------

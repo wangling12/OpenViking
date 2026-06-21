@@ -119,7 +119,10 @@ class ExtractionProcessor(DequeueHandlerBase):
 
             latest_overview = await self._get_latest_archive_overview(msg, ctx)
 
-            await self._run_extraction(msg, messages, ctx, latest_overview)
+            stats = await self._run_extraction(msg, messages, ctx, latest_overview)
+
+            # Write stats to file for session to read
+            await self._write_extraction_stats(msg.archive_uri, stats, ctx)
 
             self.report_success()
             self._circuit_breaker.record_success()
@@ -290,7 +293,7 @@ class ExtractionProcessor(DequeueHandlerBase):
         messages: List[Any],
         ctx: RequestContext,
         latest_archive_overview: str,
-    ) -> None:
+    ) -> Dict[str, Any]:
         from openviking.session import create_session_compressor
         from openviking.session.memory_policy import MemoryPolicy
         from openviking.session.session import (
@@ -367,6 +370,13 @@ class ExtractionProcessor(DequeueHandlerBase):
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
+        # Collect stats
+        stats = {
+            "memories_extracted": {},
+            "session_skills_extracted": 0,
+            "session_skill_uris": [],
+        }
+
         extraction_errors: List[BaseException] = []
         for label, res in zip(labels, results):
             if isinstance(res, Exception):
@@ -377,13 +387,43 @@ class ExtractionProcessor(DequeueHandlerBase):
                 if label == "archive_summary":
                     logger.info("Archive summary generated for %s", msg.archive_uri)
                 elif isinstance(res, dict):
-                    count = len(res.get("contexts", []))
-                    logger.info("Extracted %d %s memories", count, label)
+                    contexts = res.get("contexts", [])
+                    stats["memories_extracted"][label] = len(contexts)
+                    logger.info("Extracted %d %s memories", len(contexts), label)
+                    
+                    # Collect session skills if present
+                    if "session_skills" in res:
+                        session_skills = res["session_skills"]
+                        stats["session_skills_extracted"] += len(session_skills)
+                        for skill in session_skills:
+                            if isinstance(skill, dict):
+                                uri = skill.get("uri") or skill.get("root_uri")
+                                if uri:
+                                    stats["session_skill_uris"].append(uri)
                 elif isinstance(res, list):
+                    stats["memories_extracted"][label] = len(res)
                     logger.info("Extracted %d %s memories", len(res), label)
 
         if extraction_errors:
             raise extraction_errors[0]
+
+        return stats
+
+    async def _write_extraction_stats(
+        self, archive_uri: str, stats: Dict[str, Any], ctx: RequestContext
+    ) -> None:
+        from openviking.storage.viking_fs import get_viking_fs
+
+        viking_fs = get_viking_fs()
+        stats_uri = f"{archive_uri}/.extraction_stats.json"
+        try:
+            await viking_fs.write_file(
+                stats_uri,
+                json.dumps(stats, ensure_ascii=False),
+                ctx=ctx,
+            )
+        except Exception as e:
+            logger.warning("Failed to write extraction stats: %s", e)
 
     async def _run_archive_summary(
         self,

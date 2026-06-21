@@ -1412,6 +1412,14 @@ class Session:
                 request_wait_tracker.cleanup(telemetry.telemetry_id)
                 unregister_telemetry(telemetry.telemetry_id)
 
+            # Read extraction stats from file (written by ExtractionProcessor)
+            extraction_stats = await self._read_extraction_stats(archive_uri)
+            if extraction_stats:
+                memories_extracted = extraction_stats.get("memories_extracted", {})
+                extracted_skill_results = [
+                    {"uri": uri} for uri in extraction_stats.get("session_skill_uris", [])
+                ]
+
             # Phase 2 complete — update meta with telemetry and commit info
             snapshot = telemetry.finish("ok")
             await self._merge_and_save_commit_meta(
@@ -1504,6 +1512,17 @@ class Session:
             content=content,
             ctx=self.ctx,
         )
+
+    async def _read_extraction_stats(self, archive_uri: str) -> Optional[Dict[str, Any]]:
+        """Read extraction stats from file written by ExtractionProcessor."""
+        if not self._viking_fs:
+            return None
+        stats_uri = f"{archive_uri}/.extraction_stats.json"
+        try:
+            content = await self._viking_fs.read_file(stats_uri, ctx=self.ctx)
+            return json.loads(content)
+        except Exception:
+            return None
 
     async def _write_failed_marker(
         self,
