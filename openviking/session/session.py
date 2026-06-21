@@ -1342,6 +1342,7 @@ class Session:
                         user_id=self.ctx.user.user_id,
                         role=str(self.ctx.role),
                         telemetry_id=telemetry.telemetry_id,
+                        memory_policy=memory_policy,
                     )
                     extraction_queue = queue_manager.get_queue(queue_manager.EXTRACTION)
                     enqueue_result = await extraction_queue.enqueue(extraction_msg)

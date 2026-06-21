@@ -148,9 +148,7 @@ class QueueManager:
         # Extraction Queue
         from openviking.storage.queuefs.extraction_processor import ExtractionProcessor
 
-        extraction_handler = ExtractionProcessor(
-            max_concurrent_llm=self._max_concurrent_extraction,
-        )
+        extraction_handler = ExtractionProcessor()
         self.get_queue(
             self.EXTRACTION,
             dequeue_handler=extraction_handler,

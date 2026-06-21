@@ -22,7 +22,7 @@ logger = get_logger(__name__)
 class ExtractionProcessor(DequeueHandlerBase):
     """Processes ExtractionMsg: runs memory extraction with rate limiting."""
 
-    def __init__(self, max_concurrent_llm: int = 10):
+    def __init__(self):
         config = get_openviking_config()
         breaker_cfg = config.embedding.circuit_breaker
         self._circuit_breaker = CircuitBreaker(
@@ -30,13 +30,26 @@ class ExtractionProcessor(DequeueHandlerBase):
             reset_timeout=breaker_cfg.reset_timeout,
             max_reset_timeout=breaker_cfg.max_reset_timeout,
         )
-        self._max_concurrent_llm = max_concurrent_llm
+
+    async def _reenqueue_extraction_msg(self, msg) -> None:
+        from openviking.storage.queuefs.queue_manager import get_queue_manager
+
+        wait = self._circuit_breaker.retry_after
+        if wait > 0:
+            await asyncio.sleep(wait)
+
+        queue_manager = get_queue_manager()
+        if queue_manager is not None:
+            extraction_queue = queue_manager.get_queue(queue_manager.EXTRACTION)
+            await extraction_queue.enqueue(msg)
+            logger.info("Re-enqueued extraction message: %s", msg.archive_uri)
+        else:
+            logger.warning("No queue manager available, cannot re-enqueue: %s", msg.archive_uri)
 
     async def on_dequeue(
         self,
         data: Optional[Dict[str, Any]],
     ) -> Optional[Dict[str, Any]]:
-        """Process dequeued ExtractionMsg: run memory extraction."""
         from openviking.storage.queuefs.extraction_msg import ExtractionMsg
 
         if not data:
@@ -58,13 +71,17 @@ class ExtractionProcessor(DequeueHandlerBase):
         except CircuitBreakerOpen:
             msg.retry_count += 1
             logger.warning(
-                "Circuit breaker is open, re-enqueueing extraction message "
-                "(retry %d): %s",
+                "Circuit breaker is open, re-enqueueing extraction (retry %d): %s",
                 msg.retry_count,
                 msg.archive_uri,
             )
-            self.report_requeue()
-            return msg.to_dict()
+            try:
+                await self._reenqueue_extraction_msg(msg)
+                self.report_requeue()
+            except Exception as requeue_err:
+                logger.error("Failed to re-enqueue extraction: %s", requeue_err)
+                self.report_error(str(requeue_err), data)
+            return None
 
         ctx = RequestContext(
             user=UserIdentifier(account_id=msg.account_id, user_id=msg.user_id),
@@ -72,6 +89,12 @@ class ExtractionProcessor(DequeueHandlerBase):
         )
 
         try:
+            config = get_openviking_config()
+            if not config.memory.extraction_enabled:
+                logger.info("Memory extraction disabled, skipping %s", msg.archive_uri)
+                self.report_success()
+                return None
+
             messages = await self._read_archive_messages(msg.archive_uri, ctx)
             if not messages:
                 logger.info(
@@ -82,38 +105,7 @@ class ExtractionProcessor(DequeueHandlerBase):
 
             latest_overview = await self._get_latest_archive_overview(msg, ctx)
 
-            result = await self._run_extraction(msg, messages, ctx, latest_overview)
-
-            labels = result["labels"]
-            results = result["results"]
-
-            extraction_errors: List[BaseException] = []
-            for label, res in zip(labels, results):
-                if isinstance(res, Exception):
-                    logger.error(
-                        "Extraction task %s failed: %s", label, res, exc_info=res
-                    )
-                    self._circuit_breaker.record_failure(res)
-                    extraction_errors.append(res)
-                else:
-                    if label == "archive_summary":
-                        logger.info("Archive summary generated for %s", msg.archive_uri)
-                    elif isinstance(res, dict):
-                        count = len(res.get("contexts", []))
-                        logger.info("Extracted %d %s memories", count, label)
-                    elif isinstance(res, list):
-                        logger.info("Extracted %d %s memories", len(res), label)
-
-            if extraction_errors:
-                self._circuit_breaker.record_failure(extraction_errors[0])
-                msg.retry_count += 1
-                logger.warning(
-                    "Extraction failed, re-enqueueing (retry %d): %s",
-                    msg.retry_count,
-                    msg.archive_uri,
-                )
-                self.report_requeue()
-                return msg.to_dict()
+            await self._run_extraction(msg, messages, ctx, latest_overview)
 
             self.report_success()
             self._circuit_breaker.record_success()
@@ -129,8 +121,13 @@ class ExtractionProcessor(DequeueHandlerBase):
                 exc_info=True,
             )
             self._circuit_breaker.record_failure(e)
-            self.report_requeue()
-            return msg.to_dict()
+            try:
+                await self._reenqueue_extraction_msg(msg)
+                self.report_requeue()
+            except Exception as requeue_err:
+                logger.error("Failed to re-enqueue extraction: %s", requeue_err)
+                self.report_error(str(requeue_err), data)
+            return None
 
     async def _read_archive_messages(
         self, archive_uri: str, ctx: RequestContext
@@ -195,6 +192,107 @@ class ExtractionProcessor(DequeueHandlerBase):
                 continue
         return ""
 
+    async def _run_extraction(
+        self,
+        msg: Any,
+        messages: List[Any],
+        ctx: RequestContext,
+        latest_archive_overview: str,
+    ) -> None:
+        from openviking.session import create_session_compressor
+        from openviking.session.memory_policy import MemoryPolicy
+        from openviking.session.session import (
+            _resolve_memory_extraction_scope,
+            _split_policy_memory_types,
+        )
+
+        config = get_openviking_config()
+        effective_policy = MemoryPolicy.from_dict(msg.memory_policy)
+        extraction_scope = _resolve_memory_extraction_scope(
+            ctx,
+            effective_policy,
+            messages,
+            config_session_skill_extraction_enabled=config.memory.session_skill_extraction_enabled,
+        )
+        self_memory_enabled = extraction_scope.allow_self_memory
+        allowed_peer_ids = extraction_scope.allowed_peer_ids
+        memory_type_filter = extraction_scope.memory_types
+        long_term_memory_types, execution_memory_types = _split_policy_memory_types(
+            memory_type_filter
+        )
+
+        long_term_has_work = (
+            (self_memory_enabled or allowed_peer_ids)
+            and (long_term_memory_types is None or bool(long_term_memory_types))
+        )
+        execution_memory_has_work = (
+            self_memory_enabled
+            and (execution_memory_types is None or bool(execution_memory_types))
+        )
+
+        compressor = create_session_compressor(vikingdb=None)
+
+        tasks = []
+        labels = []
+
+        tasks.append(
+            self._run_archive_summary(msg, messages, ctx, latest_archive_overview)
+        )
+        labels.append("archive_summary")
+
+        if long_term_has_work:
+            tasks.append(
+                compressor.extract_long_term_memories(
+                    messages=messages,
+                    user=ctx.user,
+                    session_id=msg.session_id,
+                    ctx=ctx,
+                    latest_archive_overview=latest_archive_overview,
+                    archive_uri=msg.archive_uri,
+                    allowed_memory_types=long_term_memory_types,
+                    allow_self_memory=self_memory_enabled,
+                    allowed_peer_ids=allowed_peer_ids,
+                )
+            )
+            labels.append("long_term")
+
+        has_execution_memory = hasattr(compressor, "extract_execution_memories")
+        if has_execution_memory and execution_memory_has_work:
+            session_skill_extraction_enabled = (
+                config.memory.session_skill_extraction_enabled and self_memory_enabled
+            )
+            tasks.append(
+                compressor.extract_execution_memories(
+                    messages=messages,
+                    ctx=ctx,
+                    latest_archive_overview=latest_archive_overview,
+                    archive_uri=msg.archive_uri,
+                    allowed_memory_types=execution_memory_types,
+                    include_session_skills=session_skill_extraction_enabled,
+                )
+            )
+            labels.append("execution")
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        extraction_errors: List[BaseException] = []
+        for label, res in zip(labels, results):
+            if isinstance(res, Exception):
+                logger.error("Extraction task %s failed: %s", label, res, exc_info=res)
+                self._circuit_breaker.record_failure(res)
+                extraction_errors.append(res)
+            else:
+                if label == "archive_summary":
+                    logger.info("Archive summary generated for %s", msg.archive_uri)
+                elif isinstance(res, dict):
+                    count = len(res.get("contexts", []))
+                    logger.info("Extracted %d %s memories", count, label)
+                elif isinstance(res, list):
+                    logger.info("Extracted %d %s memories", len(res), label)
+
+        if extraction_errors:
+            raise extraction_errors[0]
+
     async def _run_archive_summary(
         self,
         msg: Any,
@@ -203,6 +301,7 @@ class ExtractionProcessor(DequeueHandlerBase):
         latest_archive_overview: str,
     ) -> None:
         from openviking.storage.viking_fs import get_viking_fs
+        from openviking.utils.token_estimation import estimate_text_tokens
 
         if not messages:
             return
@@ -265,51 +364,15 @@ class ExtractionProcessor(DequeueHandlerBase):
                 content=summary,
                 ctx=ctx,
             )
+            await viking_fs.write_file(
+                uri=f"{archive_uri}/.meta.json",
+                content=json.dumps(
+                    {
+                        "overview_tokens": estimate_text_tokens(summary),
+                        "abstract_tokens": estimate_text_tokens(abstract),
+                    }
+                ),
+                ctx=ctx,
+            )
         except Exception as e:
             logger.warning("Failed to write archive summary files: %s", e)
-
-    async def _run_extraction(
-        self,
-        msg: Any,
-        messages: List[Any],
-        ctx: RequestContext,
-        latest_archive_overview: str,
-    ) -> Dict[str, Any]:
-        from openviking.session import create_session_compressor
-
-        compressor = create_session_compressor(vikingdb=None)
-
-        tasks = []
-        labels = []
-
-        tasks.append(
-            self._run_archive_summary(msg, messages, ctx, latest_archive_overview)
-        )
-        labels.append("archive_summary")
-
-        tasks.append(
-            compressor.extract_long_term_memories(
-                messages=messages,
-                user=ctx.user,
-                session_id=msg.session_id,
-                ctx=ctx,
-                latest_archive_overview=latest_archive_overview,
-                archive_uri=msg.archive_uri,
-            )
-        )
-        labels.append("long_term")
-
-        if hasattr(compressor, "extract_execution_memories"):
-            tasks.append(
-                compressor.extract_execution_memories(
-                    messages=messages,
-                    ctx=ctx,
-                    latest_archive_overview=latest_archive_overview,
-                    archive_uri=msg.archive_uri,
-                )
-            )
-            labels.append("execution")
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        return {"labels": labels, "results": results}

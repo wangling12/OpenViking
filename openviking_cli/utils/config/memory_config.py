@@ -17,16 +17,6 @@ class ExtractionConfig(BaseModel):
         ge=1,
         description="Maximum concurrent memory extraction tasks",
     )
-    max_retries: int = Field(
-        default=3,
-        ge=0,
-        description="Maximum retry attempts for failed extraction",
-    )
-    retry_base_delay_sec: float = Field(
-        default=5.0,
-        gt=0,
-        description="Base delay in seconds for exponential backoff on retry",
-    )
 
     model_config = {"extra": "forbid"}
 

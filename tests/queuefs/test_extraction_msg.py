@@ -27,9 +27,20 @@ def test_extraction_msg_init():
     assert msg.role == "admin"
     assert msg.telemetry_id == "tm-123"
     assert msg.retry_count == 0
-    assert msg.max_retries == 3
+    assert msg.memory_policy is None
     assert msg.created_at > 0
     assert msg.created_at <= int(time.time())
+
+
+def test_extraction_msg_init_with_memory_policy():
+    policy = {"self": {"enabled": True}, "peer": {"enabled": False}}
+    msg = ExtractionMsg(
+        session_id="sess-1",
+        archive_uri="viking://user/default/archive/sess-1",
+        memory_policy=policy,
+    )
+
+    assert msg.memory_policy == policy
 
 
 def test_extraction_msg_to_dict():
@@ -51,7 +62,7 @@ def test_extraction_msg_to_dict():
     assert d["role"] == "root"
     assert d["telemetry_id"] == ""
     assert d["retry_count"] == 0
-    assert d["max_retries"] == 3
+    assert d["memory_policy"] is None
     assert d["created_at"] == msg.created_at
 
 
@@ -65,7 +76,7 @@ def test_extraction_msg_from_dict():
         "role": "editor",
         "telemetry_id": "tm-456",
         "retry_count": 2,
-        "max_retries": 5,
+        "memory_policy": {"self": {"enabled": True}},
         "created_at": 1700000000,
     }
 
@@ -79,7 +90,7 @@ def test_extraction_msg_from_dict():
     assert msg.role == "editor"
     assert msg.telemetry_id == "tm-456"
     assert msg.retry_count == 2
-    assert msg.max_retries == 5
+    assert msg.memory_policy == {"self": {"enabled": True}}
     assert msg.created_at == 1700000000
 
 
@@ -113,6 +124,7 @@ def test_extraction_msg_from_dict_missing_required_fields():
 
 
 def test_extraction_msg_to_json_from_json_roundtrip():
+    policy = {"self": {"enabled": True}, "memory_types": ["preferences"]}
     msg = ExtractionMsg(
         session_id="sess-4",
         archive_uri="viking://user/default/archive/sess-4",
@@ -121,7 +133,7 @@ def test_extraction_msg_to_json_from_json_roundtrip():
         role="viewer",
         telemetry_id="tm-789",
         retry_count=1,
-        max_retries=10,
+        memory_policy=policy,
     )
 
     json_str = msg.to_json()
@@ -135,7 +147,7 @@ def test_extraction_msg_to_json_from_json_roundtrip():
     assert restored.role == msg.role
     assert restored.telemetry_id == msg.telemetry_id
     assert restored.retry_count == msg.retry_count
-    assert restored.max_retries == msg.max_retries
+    assert restored.memory_policy == msg.memory_policy
     assert restored.created_at == msg.created_at
 
     with pytest.raises(ValueError, match="Invalid JSON string"):
