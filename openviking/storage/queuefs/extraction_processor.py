@@ -34,7 +34,7 @@ class ExtractionProcessor(DequeueHandlerBase):
             max_reset_timeout=breaker_cfg.max_reset_timeout,
         )
 
-    async def _reenqueue_extraction_msg(self, msg) -> None:
+    async def _reenqueue_extraction_msg(self, msg: ExtractionMsg) -> None:
         from openviking.storage.queuefs.queue_manager import get_queue_manager
 
         wait = self._circuit_breaker.retry_after
@@ -203,8 +203,12 @@ class ExtractionProcessor(DequeueHandlerBase):
 
         hydrated = []
         for msg in messages:
-            msg_dict = msg.to_dict() if hasattr(msg, "to_dict") else dict(msg.__dict__)
-            hydrated_msg = type(msg).from_dict(msg_dict)
+            try:
+                msg_dict = msg.to_dict() if hasattr(msg, "to_dict") else dict(msg.__dict__)
+                hydrated_msg = type(msg).from_dict(msg_dict)
+            except Exception as e:
+                logger.warning("Failed to deserialize message for hydration: %s", e)
+                continue
             for part in hydrated_msg.parts:
                 if not isinstance(part, ToolPart):
                     continue
@@ -407,6 +411,8 @@ class ExtractionProcessor(DequeueHandlerBase):
                 elif isinstance(res, list):
                     stats["memories_extracted"][label] = len(res)
                     logger.info("Extracted %d %s memories", len(res), label)
+                else:
+                    logger.warning("Unexpected extraction result type for %s: %s", label, type(res))
 
         if extraction_errors:
             raise extraction_errors[0]

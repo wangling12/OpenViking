@@ -76,7 +76,7 @@ async def test_extraction_queue_enqueue_allows_after_dedupe_window():
         r1 = await q.enqueue(msg1)
         assert r1 == "queued-id"
 
-        key = "acc|u1|sess-1"
+        key = "acc|u1|sess-1|viking://user/default/archive/sess-1"
         q._last_enqueue[key] = time.monotonic() - 50.0
 
         msg2 = ExtractionMsg(

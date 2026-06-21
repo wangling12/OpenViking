@@ -71,9 +71,12 @@ class CircuitBreaker:
                     if probe_elapsed < self._current_reset_timeout:
                         raise CircuitBreakerOpen("probe already in progress")
                     logger.warning(
-                        f"Circuit breaker probe timed out after {probe_elapsed:.0f}s, resetting"
+                        f"Circuit breaker probe timed out after {probe_elapsed:.0f}s, transitioning back to OPEN"
                     )
+                    self._state = _STATE_OPEN
                     self._probe_in_progress = False
+                    self._last_failure_time = time.monotonic()
+                    raise CircuitBreakerOpen("probe timed out")
                 self._probe_in_progress = True
                 self._probe_started_at = time.monotonic()
                 return

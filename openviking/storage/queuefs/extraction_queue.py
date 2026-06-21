@@ -25,7 +25,7 @@ class ExtractionQueue(NamedQueue):
 
     @staticmethod
     def _dedupe_key(msg: ExtractionMsg) -> str:
-        return f"{msg.account_id}|{msg.user_id}|{msg.session_id}"
+        return f"{msg.account_id}|{msg.user_id}|{msg.session_id}|{msg.archive_uri}"
 
     async def enqueue(self, msg: ExtractionMsg, skip_dedupe: bool = False) -> str:
         """Serialize ExtractionMsg object and store in queue.
