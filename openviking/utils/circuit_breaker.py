@@ -58,6 +58,7 @@ class CircuitBreaker:
         self._failure_count = 0
         self._last_failure_time: float = 0
         self._probe_in_progress: bool = False
+        self._probe_started_at: float = 0
 
     def check(self) -> None:
         """Allow the request through, or raise ``CircuitBreakerOpen``."""
@@ -66,14 +67,21 @@ class CircuitBreaker:
                 return
             if self._state == _STATE_HALF_OPEN:
                 if self._probe_in_progress:
-                    raise CircuitBreakerOpen("probe already in progress")
+                    probe_elapsed = time.monotonic() - self._probe_started_at
+                    if probe_elapsed < self._current_reset_timeout:
+                        raise CircuitBreakerOpen("probe already in progress")
+                    logger.warning(
+                        f"Circuit breaker probe timed out after {probe_elapsed:.0f}s, resetting"
+                    )
+                    self._probe_in_progress = False
                 self._probe_in_progress = True
+                self._probe_started_at = time.monotonic()
                 return
-            # OPEN — check if timeout elapsed
             elapsed = time.monotonic() - self._last_failure_time
             if elapsed >= self._current_reset_timeout:
                 self._state = _STATE_HALF_OPEN
                 self._probe_in_progress = True
+                self._probe_started_at = time.monotonic()
                 logger.info("Circuit breaker transitioning OPEN -> HALF_OPEN (timeout elapsed)")
                 return
             raise CircuitBreakerOpen(

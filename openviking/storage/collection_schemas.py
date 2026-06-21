@@ -325,12 +325,12 @@ async def init_context_collection(storage, _allow_recurse: bool = True) -> bool:
         # Old collection without embedding metadata - check actual index dimension
         actual_dimension = existing_meta.get("Dimension")
         current_dimension = embedding_meta.get("dimension")
-        
+
         if actual_dimension is not None and current_dimension is not None and actual_dimension != current_dimension:
             return await _auto_rebuild_collection(
                 storage, config, actual_dimension, current_dimension, _allow_recurse,
             )
-        
+
         logger.warning(
             "Existing collection has %d vector(s) but no embedding metadata "
             "(created by an older version). Backfilling with current config and continuing.",

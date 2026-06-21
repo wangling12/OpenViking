@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+import re
 from typing import Any, Dict, List, Optional
 
 from openviking.server.identity import RequestContext, Role
@@ -107,6 +108,13 @@ class ExtractionProcessor(DequeueHandlerBase):
                 self.report_success()
                 return None
 
+            parts = msg.archive_uri.rsplit("/history/", 1)
+            if len(parts) != 2:
+                logger.error("archive_uri missing /history/ segment: %s", msg.archive_uri)
+                self.report_error("Invalid archive_uri format", data)
+                return None
+            session_uri = parts[0]
+
             messages = await self._read_archive_messages(msg.archive_uri, ctx)
             if not messages:
                 logger.info(
@@ -115,12 +123,6 @@ class ExtractionProcessor(DequeueHandlerBase):
                 self.report_success()
                 return None
 
-            parts = msg.archive_uri.rsplit("/history/", 1)
-            if len(parts) != 2:
-                logger.error("archive_uri missing /history/ segment: %s", msg.archive_uri)
-                self.report_error("Invalid archive_uri format", data)
-                return None
-            session_uri = parts[0]
             messages = await self._hydrate_tool_outputs(messages, session_uri, ctx)
 
             latest_overview = await self._get_latest_archive_overview(msg, ctx)
@@ -246,8 +248,6 @@ class ExtractionProcessor(DequeueHandlerBase):
     async def _get_latest_archive_overview(
         self, msg: Any, ctx: RequestContext
     ) -> str:
-        import re
-
         from openviking.storage.viking_fs import get_viking_fs
 
         viking_fs = get_viking_fs()
@@ -387,7 +387,6 @@ class ExtractionProcessor(DequeueHandlerBase):
         for label, res in zip(labels, results):
             if isinstance(res, BaseException):
                 logger.error("Extraction task %s failed: %s", label, res, exc_info=res)
-                self._circuit_breaker.record_failure(res)
                 extraction_errors.append(res)
             else:
                 if label == "archive_summary":
@@ -396,8 +395,7 @@ class ExtractionProcessor(DequeueHandlerBase):
                     contexts = res.get("contexts", [])
                     stats["memories_extracted"][label] = len(contexts)
                     logger.info("Extracted %d %s memories", len(contexts), label)
-                    
-                    # Collect session skills if present
+
                     if "session_skills" in res:
                         session_skills = res["session_skills"]
                         stats["session_skills_extracted"] += len(session_skills)
